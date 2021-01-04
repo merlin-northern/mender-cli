@@ -15,6 +15,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/gob"
 	"fmt"
@@ -43,13 +44,10 @@ import (
 
 const (
 	// Time allowed to write a message to the peer.
-	writeWait = 1 * time.Second
-
-	// Maximum message size allowed from peer.
-	maxMessageSize = 8192
+	writeWait = 10 * time.Second
 
 	// Time allowed to read the next pong message from the peer.
-	defaultPingWait = 1 * time.Minute
+	pongWait = 1 * time.Minute
 
 	// protocols
 	httpsProtocol = "https"
@@ -92,17 +90,16 @@ func getWebSocketScheme(scheme string) string {
 
 // TerminalCmd handles the terminal command
 type TerminalCmd struct {
-	server             string
-	recordFile         string
 	playbackFile       string
-	skipVerify         bool
-	deviceID           string
-	sessionID          string
-	running            bool
-	stop               chan bool
 	stopRecording      chan bool
 	userInputChan      chan []byte
 	terminalOutputChan chan []byte
+	server     string
+	skipVerify bool
+	deviceID   string
+	sessionID  string
+	running    bool
+	stop       chan bool
 }
 
 // NewTerminalCmd returns a new TerminalCmd
@@ -179,7 +176,8 @@ func (c *TerminalCmd) record() {
 
 // Run executes the command
 func (c *TerminalCmd) Run() error {
-	log.Info(fmt.Sprintf("Connecting to the remote terminal of the device %s...", c.deviceID))
+	ctx, cancelContext := context.WithCancel(context.Background())
+	defer cancelContext()
 
 	if _, err := os.Stat(c.recordFile); os.IsNotExist(err) {
 		if len(c.recordFile) > 0 {
@@ -203,7 +201,7 @@ func (c *TerminalCmd) Run() error {
 	deviceConnectPath := "/api/management/v1/deviceconnect/devices/" + c.deviceID + "/connect"
 	parsedURL, err := url.Parse(c.server)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Unable to parse the server URL")
 	}
 
 	scheme := getWebSocketScheme(parsedURL.Scheme)
@@ -216,36 +214,48 @@ func (c *TerminalCmd) Run() error {
 	}
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), headers)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Unable to connect to the device")
 	}
 	defer conn.Close()
 
-	// ping-pong
-	conn.SetReadLimit(maxMessageSize)
-	_ = conn.SetReadDeadline(time.Now().Add(defaultPingWait))
-	conn.SetPingHandler(func(message string) error {
-		pongWait, _ := strconv.Atoi(message)
-		_ = conn.SetReadDeadline(time.Now().Add(time.Duration(pongWait) * time.Second))
-		return conn.WriteControl(websocket.PongMessage, []byte{}, time.Now().Add(writeWait))
+	// handle the ping-pong connection health check
+	err = conn.SetReadDeadline(time.Now().Add(pongWait))
+	if err != nil {
+		return errors.Wrap(err, "Unable to set the read deadline")
+	}
+
+	pingPeriod := (pongWait * 9) / 10
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+
+	conn.SetPongHandler(func(string) error {
+		ticker.Reset(pingPeriod)
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+
+	conn.SetPingHandler(func(msg string) error {
+		ticker.Reset(pingPeriod)
+		err := conn.SetReadDeadline(time.Now().Add(pongWait))
+		if err != nil {
+			return err
+		}
+		return conn.WriteControl(
+			websocket.PongMessage,
+			[]byte(msg),
+			time.Now().Add(writeWait),
+		)
 	})
 
 	log.Info("Press CTRL+] to quit the session")
 
 	// set the terminal in raw mode
-	oldState, err := term.MakeRaw(0)
+	oldState, err := term.MakeRaw(termID)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Unable to set the terminal in raw mode")
 	}
 	defer func() {
-		_ = term.Restore(0, oldState)
+		_ = term.Restore(termID, oldState)
 	}()
-
-	// get the terminal width and height
-	termID := int(os.Stdout.Fd())
-	termWidth, termHeight, err := terminal.GetSize(termID)
-	if err != nil {
-		return err
-	}
 
 	// send the shell start message
 	m := &ws.ProtoMsg{
@@ -261,68 +271,54 @@ func (c *TerminalCmd) Run() error {
 
 	data, err := msgpack.Marshal(m)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Unable to parse the message from the websocket")
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 	_ = conn.WriteMessage(websocket.BinaryMessage, data)
 
+	// message channel
+	msgChan := make(chan *ws.ProtoMsg)
+
 	c.running = true
-	go c.pipeStdout(conn, os.Stdout)
+	go c.pipeStdout(msgChan, os.Stdout)
 	go c.pipeStdin(conn, os.Stdin)
 
 	// handle CTRL+C and signals
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
-
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, unix.SIGINT, unix.SIGTERM)
 
 	// resize the terminal window
-	ticker := time.NewTicker(500 * time.Millisecond)
-	done := make(chan bool)
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				newTermWidth, newTermHeight, _ := terminal.GetSize(termID)
-				if newTermWidth != termWidth || newTermHeight != termHeight {
-					termWidth = newTermWidth
-					termHeight = newTermHeight
-					m := &ws.ProtoMsg{
-						Header: ws.ProtoHdr{
-							Proto:   ws.ProtoTypeShell,
-							MsgType: wsshell.MessageTypeResizeShell,
-							Properties: map[string]interface{}{
-								"terminal_width":  termWidth,
-								"terminal_height": termHeight,
-							},
-						},
-					}
-					if data, err := msgpack.Marshal(m); err == nil {
-						_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-						_ = conn.WriteMessage(websocket.BinaryMessage, data)
-					}
-				}
-			}
-		}
-	}()
+	go c.resizeTerminal(ctx, msgChan, termID, termWidth, termHeight)
 
 	// wait for CTRL+C, signals or stop
-	select {
-	case <-interrupt:
-	case <-quit:
-	case <-c.stop:
+	for c.running {
+		select {
+		case msg := <-msgChan:
+			data, err := msgpack.Marshal(msg)
+			if err != nil {
+				log.Err(fmt.Sprintf("error: %v", err))
+				break
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = conn.WriteMessage(websocket.BinaryMessage, data)
+		case <-ticker.C:
+			pongWaitString := strconv.Itoa(int(pongWait.Seconds()))
+			_ = conn.WriteControl(
+				websocket.PingMessage,
+				[]byte(pongWaitString),
+				time.Now().Add(writeWait),
+			)
+		case <-quit:
+			c.running = false
+		case <-c.stop:
+			c.running = false
+		}
 	}
 
-	// stop the ticker
-	ticker.Stop()
-	select {
-	case done <- true:
-	default:
-	}
+	// cancel the context
+	cancelContext()
 
+	// send the stop shell message
 	m = &ws.ProtoMsg{
 		Header: ws.ProtoHdr{
 			Proto:     ws.ProtoTypeShell,
@@ -333,7 +329,7 @@ func (c *TerminalCmd) Run() error {
 
 	data, err = msgpack.Marshal(m)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Unable to parse the message from the websocket")
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 	_ = conn.WriteMessage(websocket.BinaryMessage, data)
@@ -342,13 +338,42 @@ func (c *TerminalCmd) Run() error {
 	return nil
 }
 
+func (c *TerminalCmd) resizeTerminal(ctx context.Context, msgChan chan *ws.ProtoMsg, termID int, termWidth int, termHeight int) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			newTermWidth, newTermHeight, _ := terminal.GetSize(termID)
+			if newTermWidth != termWidth || newTermHeight != termHeight {
+				termWidth = newTermWidth
+				termHeight = newTermHeight
+				m := &ws.ProtoMsg{
+					Header: ws.ProtoHdr{
+						Proto:   ws.ProtoTypeShell,
+						MsgType: wsshell.MessageTypeResizeShell,
+						Properties: map[string]interface{}{
+							"terminal_width":  termWidth,
+							"terminal_height": termHeight,
+						},
+					},
+				}
+				msgChan <- m
+			}
+		}
+	}
+}
+
 func (c *TerminalCmd) Stop() {
 	c.stop <- true
 	c.stopRecording <- true
 	c.running = false
 }
 
-func (c *TerminalCmd) pipeStdout(conn *websocket.Conn, r io.Reader) {
+func (c *TerminalCmd) pipeStdout(msgChan chan *ws.ProtoMsg, r io.Reader) {
 	if len(c.playbackFile) > 0 {
 		for c.running {
 
@@ -365,8 +390,8 @@ func (c *TerminalCmd) pipeStdout(conn *websocket.Conn, r io.Reader) {
 			}
 			break
 		}
-		// CLTR+], terminate the shell
-		if raw[0] == 29 {
+		// CLTR+] or EOF, terminate the shell
+		if raw[0] == 29 || raw[0] == 4 {
 			c.Stop()
 			return
 		}
@@ -379,17 +404,7 @@ func (c *TerminalCmd) pipeStdout(conn *websocket.Conn, r io.Reader) {
 			},
 			Body: raw[:n],
 		}
-
-		data, err := msgpack.Marshal(m)
-		if err != nil {
-			log.Err(fmt.Sprintf("error: %v", err))
-			break
-		}
-
-		c.userInputChan <- m.Body
-
-		_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-		_ = conn.WriteMessage(websocket.BinaryMessage, data)
+		msgChan <- m
 	}
 }
 
