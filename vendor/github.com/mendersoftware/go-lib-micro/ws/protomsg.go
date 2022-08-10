@@ -24,6 +24,9 @@ type ProtoType uint16
 const (
 	// ProtoInvalid signifies an invalid (uninitialized) ProtoMsg.
 	ProtoInvalid ProtoType = iota
+	// ProtoTypeExec is used for communicating a command to be executed. It is opposed to
+	// the way we pass shell data: as keystrokes and terminal echo bytes.
+	ProtoTypeExec
 	// ProtoTypeShell is used for communicating remote terminal session data.
 	ProtoTypeShell
 	// ProtoTypeFileTransfer is used for file transfer from/to the device.
