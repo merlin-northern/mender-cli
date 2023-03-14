@@ -62,6 +62,18 @@ def clean_mender_storage():
 
 class TestArtifactUpload:
     @pytest.mark.usefixtures('clean_deployments_db', 'clean_mender_storage')
+    def test_ok_direct(self, logged_in_single_user, valid_artifact):
+        c = cli.MenderCliCoverage()
+        r = c.run('--server', 'https://mender-api-gateway', \
+                  '--skip-verify', \
+                  'artifacts', 'upload', \
+                  '--direct',
+                  valid_artifact)
+
+        assert r.returncode==0, r.stderr
+        expect_output(r.stdout, 'upload successful')
+
+    @pytest.mark.usefixtures('clean_deployments_db', 'clean_mender_storage')
     def test_ok(self, logged_in_single_user, valid_artifact):
         c = cli.MenderCliCoverage()
         r = c.run('--server', 'https://mender-api-gateway', \

@@ -1,16 +1,16 @@
 // Copyright 2022 Northern.tech AS
 //
-//    Licensed under the Apache License, Version 2.0 (the "License");
-//    you may not use this file except in compliance with the License.
-//    You may obtain a copy of the License at
+//	Licensed under the Apache License, Version 2.0 (the "License");
+//	you may not use this file except in compliance with the License.
+//	You may obtain a copy of the License at
 //
-//        http://www.apache.org/licenses/LICENSE-2.0
+//	    http://www.apache.org/licenses/LICENSE-2.0
 //
-//    Unless required by applicable law or agreed to in writing, software
-//    distributed under the License is distributed on an "AS IS" BASIS,
-//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//    See the License for the specific language governing permissions and
-//    limitations under the License.
+//	Unless required by applicable law or agreed to in writing, software
+//	distributed under the License is distributed on an "AS IS" BASIS,
+//	WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//	See the License for the specific language governing permissions and
+//	limitations under the License.
 package deployments
 
 import (
@@ -72,6 +72,7 @@ const (
 	artifactUploadURL  = "/api/management/v1/deployments/artifacts"
 	artifactsListURL   = artifactUploadURL
 	artifactsDeleteURL = artifactUploadURL
+	directUploadURL    = "/api/management/v1/deployments/artifacts/directupload"
 )
 
 type Client struct {
@@ -79,7 +80,23 @@ type Client struct {
 	artifactUploadURL string
 	artifactsListURL  string
 	artifactDeleteURL string
+	directUploadURL   string
 	client            *http.Client
+}
+
+type Link struct {
+	Uri      string            `json:"uri"`
+	Expire   time.Time         `json:"expire,omitempty"`
+	Method   string            `json:"method,omitempty"`
+	Header   map[string]string `json:"header,omitempty"`
+	TenantID string            `json:"-"`
+}
+
+type UploadLink struct {
+	ArtifactID string    `json:"id"`
+	IssuedAt   time.Time `json:"-"`
+
+	Link
 }
 
 func NewClient(url string, skipVerify bool) *Client {
@@ -88,8 +105,25 @@ func NewClient(url string, skipVerify bool) *Client {
 		artifactUploadURL: client.JoinURL(url, artifactUploadURL),
 		artifactsListURL:  client.JoinURL(url, artifactsListURL),
 		artifactDeleteURL: client.JoinURL(url, artifactsDeleteURL),
+		directUploadURL:   client.JoinURL(url, directUploadURL),
 		client:            client.NewHttpClient(skipVerify),
 	}
+}
+
+func (c *Client) DirectDownloadLink(token string) (*UploadLink, error) {
+	var link UploadLink
+
+	body, err := client.DoPostRequest(token, c.directUploadURL, c.client)
+	if err != nil {
+		return nil, err
+	}
+
+	err = json.Unmarshal(body, &link)
+	if err != nil {
+		return nil, err
+	}
+
+	return &link, nil
 }
 
 func (c *Client) ListArtifacts(token string, detailLevel int) error {
@@ -155,6 +189,87 @@ func listArtifact(a artifactData, detailLevel int) {
 	}
 
 	fmt.Println("--------------------------------------------------------------------------------")
+}
+
+func (c *Client) DirectUpload(
+	artifactPath, token, url string,
+	noProgress bool,
+) error {
+	var bar *pb.ProgressBar
+
+	artifact, err := os.Open(artifactPath)
+	if err != nil {
+		return errors.Wrap(err, "Cannot read artifact file")
+	}
+
+	artifactStats, err := artifact.Stat()
+	if err != nil {
+		return errors.Wrap(err, "Cannot read artifact file stats")
+	}
+
+	// create pipe
+	pR, pW := io.Pipe()
+
+	writer := pW
+
+	req, err := http.NewRequest(http.MethodPut, url, pR)
+	if err != nil {
+		return errors.Wrap(err, "Cannot create request")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.ContentLength = artifactStats.Size()
+
+	reqDump, _ := httputil.DumpRequest(req, false)
+	log.Verbf("sending request: \n%v", string(reqDump))
+
+	if !noProgress {
+		// create progress bar
+		bar = pb.New64(artifactStats.Size()).
+			Set(pb.Bytes, true).
+			SetRefreshRate(time.Millisecond * 100)
+		bar.Start()
+	}
+
+	go func() {
+		defer pW.Close()
+		defer artifact.Close()
+
+		var w io.Writer
+		w = writer
+		if !noProgress {
+			w = bar.NewProxyWriter(writer)
+		}
+
+		if _, err := io.Copy(w, artifact); err != nil {
+			writer.Close()
+			_ = pR.CloseWithError(err)
+			return
+		}
+
+		writer.Close()
+	}()
+
+	rsp, err := c.client.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "POST /artifacts request failed")
+	}
+	defer rsp.Body.Close()
+	pR.Close()
+
+	rspDump, _ := httputil.DumpResponse(rsp, true)
+	log.Verbf("response: \n%v\n", string(rspDump))
+
+	if rsp.StatusCode != http.StatusOK {
+		if rsp.StatusCode == http.StatusUnauthorized {
+			log.Verbf("artifact upload to '%s' failed with status %d", req.Host, rsp.StatusCode)
+			return errors.New("Unauthorized. Please Login first")
+		}
+		return errors.New(
+			fmt.Sprintf("artifact upload to '%s' failed with status %d", req.Host, rsp.StatusCode),
+		)
+	}
+
+	return nil
 }
 
 func (c *Client) UploadArtifact(
