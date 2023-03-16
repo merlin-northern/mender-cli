@@ -218,7 +218,7 @@ func (c *Client) DirectUpload(
 		return errors.Wrap(err, "Cannot create request")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Authorization", "Bearer "+string(token))
+ req.ContentLength=artifactStats.Size()
 
 	reqDump, _ := httputil.DumpRequest(req, false)
 	log.Verbf("sending request: \n%v", string(reqDump))
