@@ -217,7 +217,7 @@ func (c *Client) DirectUpload(
 	if err != nil {
 		return errors.Wrap(err, "Cannot create request")
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/vnd.mender-artifact")
 	req.ContentLength = artifactStats.Size()
 
 	reqDump, _ := httputil.DumpRequest(req, false)
