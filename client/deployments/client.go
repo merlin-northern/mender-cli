@@ -21,6 +21,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httputil"
+	urlmod "net/url"
 	"os"
 	"strconv"
 	"time"
@@ -192,7 +193,7 @@ func listArtifact(a artifactData, detailLevel int) {
 }
 
 func (c *Client) DirectUpload(
-	artifactPath, token, url string,
+	artifactPath, url string,
 	noProgress bool,
 ) error {
 	var bar *pb.ProgressBar
@@ -249,6 +250,12 @@ func (c *Client) DirectUpload(
 		writer.Close()
 	}()
 
+	u, _ := urlmod.Parse(url)
+	for k, v := range u.Query() {
+		for _,h := range v {
+			req.Header.Add(k, h)
+		}
+	}
 	rsp, err := c.client.Do(req)
 	if err != nil {
 		return errors.Wrap(err, "POST /artifacts request failed")
