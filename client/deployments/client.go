@@ -33,6 +33,10 @@ import (
 	"github.com/mendersoftware/mender-cli/log"
 )
 
+const (
+	httpErrorBoundary = 300
+)
+
 type artifactsList struct {
 	artifacts []artifactData
 }
@@ -202,6 +206,7 @@ func (c *Client) DirectUpload(
 	if err != nil {
 		return errors.Wrap(err, "Cannot read artifact file")
 	}
+	defer artifact.Close()
 
 	artifactStats, err := artifact.Stat()
 	if err != nil {
@@ -230,7 +235,7 @@ func (c *Client) DirectUpload(
 
 	u, _ := urlmod.Parse(url)
 	for k, v := range u.Query() {
-		for _,h := range v {
+		for _, h := range v {
 			req.Header.Add(k, h)
 		}
 	}
@@ -243,11 +248,7 @@ func (c *Client) DirectUpload(
 	rspDump, _ := httputil.DumpResponse(rsp, true)
 	log.Verbf("response: \n%v\n", string(rspDump))
 
-	if rsp.StatusCode != http.StatusOK {
-		if rsp.StatusCode == http.StatusUnauthorized {
-			log.Verbf("artifact upload to '%s' failed with status %d", req.Host, rsp.StatusCode)
-			return errors.New("Unauthorized. Please Login first")
-		}
+	if rsp.StatusCode >= httpErrorBoundary {
 		return errors.New(
 			fmt.Sprintf("artifact upload to '%s' failed with status %d", req.Host, rsp.StatusCode),
 		)
