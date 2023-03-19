@@ -208,12 +208,17 @@ func (c *Client) DirectUpload(
 		return errors.Wrap(err, "Cannot read artifact file stats")
 	}
 
-	// create pipe
-	pR, pW := io.Pipe()
-
-	writer := pW
-
-	req, err := http.NewRequest(http.MethodPut, url, pR)
+	var req *http.Request
+	if !noProgress {
+		// create progress bar
+		bar = pb.New64(artifactStats.Size()).
+			Set(pb.Bytes, true).
+			SetRefreshRate(time.Millisecond * 100)
+		bar.Start()
+		req, err = http.NewRequest(http.MethodPut, url, bar.NewProxyReader(artifact))
+	} else {
+		req, err = http.NewRequest(http.MethodPut, url, artifact)
+	}
 	if err != nil {
 		return errors.Wrap(err, "Cannot create request")
 	}
@@ -222,33 +227,6 @@ func (c *Client) DirectUpload(
 
 	reqDump, _ := httputil.DumpRequest(req, false)
 	log.Verbf("sending request: \n%v", string(reqDump))
-
-	if !noProgress {
-		// create progress bar
-		bar = pb.New64(artifactStats.Size()).
-			Set(pb.Bytes, true).
-			SetRefreshRate(time.Millisecond * 100)
-		bar.Start()
-	}
-
-	go func() {
-		defer pW.Close()
-		defer artifact.Close()
-
-		var w io.Writer
-		w = writer
-		if !noProgress {
-			w = bar.NewProxyWriter(writer)
-		}
-
-		if _, err := io.Copy(w, artifact); err != nil {
-			writer.Close()
-			_ = pR.CloseWithError(err)
-			return
-		}
-
-		writer.Close()
-	}()
 
 	u, _ := urlmod.Parse(url)
 	for k, v := range u.Query() {
@@ -261,7 +239,6 @@ func (c *Client) DirectUpload(
 		return errors.Wrap(err, "POST /artifacts request failed")
 	}
 	defer rsp.Body.Close()
-	pR.Close()
 
 	rspDump, _ := httputil.DumpResponse(rsp, true)
 	log.Verbf("response: \n%v\n", string(rspDump))
