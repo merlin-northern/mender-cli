@@ -91,15 +91,11 @@ type Client struct {
 
 type Link struct {
 	Uri      string            `json:"uri"`
-	Expire   time.Time         `json:"expire,omitempty"`
-	Method   string            `json:"method,omitempty"`
 	Header   map[string]string `json:"header,omitempty"`
-	TenantID string            `json:"-"`
 }
 
 type UploadLink struct {
 	ArtifactID string    `json:"id"`
-	IssuedAt   time.Time `json:"-"`
 
 	Link
 }
@@ -198,6 +194,7 @@ func listArtifact(a artifactData, detailLevel int) {
 
 func (c *Client) DirectUpload(
 	artifactPath, url string,
+	headers map[string] string,
 	noProgress bool,
 ) error {
 	var bar *pb.ProgressBar
@@ -238,6 +235,9 @@ func (c *Client) DirectUpload(
 		for _, h := range v {
 			req.Header.Add(k, h)
 		}
+	}
+	for k, h := range headers {
+		req.Header.Set(k, h)
 	}
 	rsp, err := c.client.Do(req)
 	if err != nil {

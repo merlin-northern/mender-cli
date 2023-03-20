@@ -108,7 +108,7 @@ func (c *ArtifactUploadCmd) Run() error {
 		}
 
 		log.Infof("uploading the artifact.\n")
-		err = client.DirectUpload(c.artifactPath, link.Uri, c.withoutProgress)
+		err = client.DirectUpload(c.artifactPath, link.Uri, link.Header, c.withoutProgress)
 		if err != nil {
 			return errors.Wrap(err, "failed to upload the artifact")
 		}
