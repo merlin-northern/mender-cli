@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Copyright 2021 Northern.tech AS
+# Copyright 2023 Northern.tech AS
 #
 #    Licensed under the Apache License, Version 2.0 (the "License");
 #    you may not use this file except in compliance with the License.
@@ -14,12 +14,15 @@
 #    limitations under the License.
 from minio import Minio
 
-def cleanup_mender_storage(bucket='mender-artifact-storage'):
-    client = Minio('minio.s3.docker.mender.io:9000',
-                    access_key='minio',
-                    secret_key='minio123',
-                    region='us-east-1',
-                    secure=False)
+
+def cleanup_mender_storage(bucket="mender-artifact-storage"):
+    client = Minio(
+        "minio.s3.docker.mender.io:9000",
+        access_key="minio",
+        secret_key="minio123",
+        region="us-east-1",
+        secure=False,
+    )
 
     objs = client.list_objects(bucket)
     client.remove_objects(bucket, objs)

@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# Copyright 2021 Northern.tech AS
+# Copyright 2023 Northern.tech AS
 #
 #    Licensed under the Apache License, Version 2.0 (the "License");
 #    you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ COVERAGE_DIR = "/tests/cover"
 
 class Cli:
     """Simple wrapper for subprocess"""
+
     def __init__(self, path=MENDER_CLI):
         self.path = path
 
@@ -43,6 +44,7 @@ class Cli:
 
 class CliResult:
     """Wraps CompletedProcess, decodes output to strings"""
+
     def __init__(self, completed_process, stdout=None, stderr=None):
         self.completed_process = completed_process
 
