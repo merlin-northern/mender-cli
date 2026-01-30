@@ -63,9 +63,19 @@ class Server:
 
         self.num_accepted_devices = 0
 
-    def get_auth_token(self):
+    def _login(self):
         r = ApiClient(useradm.URL_MGMT, self.host).call(
             "POST", useradm.URL_LOGIN, auth=(self.username, self.password)
+        )
+        return r
+
+    def get_auth_token(self):
+        logger.info("logging in as user: " + self.username + "")
+        r = redo.retry(
+            self._login,
+            check=lambda res: res.status_code == 200,
+            sleeptime=8,
+            attempts=15,
         )
         assert r.status_code == 200
         assert r.text is not None
